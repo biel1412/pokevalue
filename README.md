@@ -8,7 +8,9 @@ Sua carteira de cartas Pokémon TCG, no celular. Tire uma foto da carta, cadastr
 
 - **Dashboard**: patrimônio total, variação no período (7D / 1M / 3M / 1A / Tudo), gráfico interativo (arraste o dedo), investido × lucro, suas cartas mais valiosas e alocação por tipo
 - **Escanear carta**: foto pela câmera ou galeria (comprimida automaticamente), nome, coleção, número, tipo, raridade, condição (M/NM/SP/MP/HP/D), idioma, quantidade, preço pago e valor de mercado
-- **Pesquisa de preço**: atalhos para Liga Pokémon, TCGplayer e Cardmarket
+- **Busca automática**: digite o nome (ex.: `charizard ex 125`), escolha a carta e o app preenche coleção, número, tipo, raridade, imagem oficial e **preço de mercado convertido para R$** (TCGplayer em US$ e Cardmarket em €, com cotação do dia). Dados da [TCGdex](https://tcgdex.dev), câmbio da [Frankfurter](https://frankfurter.dev)
+- **Atualizar todos os preços** com um toque (tela inicial ou Perfil) para as cartas vinculadas à busca
+- **Pesquisa manual**: atalhos para Liga Pokémon, TCGplayer e Cardmarket
 - **Inventário**: grade com busca, filtros por tipo e favoritas, ordenação por valor, valorização, data ou nome
 - **Detalhe da carta**: efeito 3D/holo ao tocar, histórico de preço, lucro/prejuízo, atualização rápida do valor
 - **Análise**: distribuição por tipo, raridade e coleção, maiores altas e cartas em queda

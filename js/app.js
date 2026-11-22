@@ -274,6 +274,238 @@
   }
 
   // =========================================================
+  // BUSCA AUTOMÁTICA (TCGdex) + COTAÇÃO
+  // =========================================================
+  const TCGDEX = 'https://api.tcgdex.net/v2';
+  const TYPE_MAP = { grass: 'grass', fire: 'fire', water: 'water', lightning: 'lightning', psychic: 'psychic', fighting: 'fighting', darkness: 'darkness', metal: 'metal', dragon: 'dragon', colorless: 'colorless', fairy: 'psychic',
+    planta: 'grass', fogo: 'fire', 'água': 'water', agua: 'water', 'elétrico': 'lightning', eletrico: 'lightning', 'psíquico': 'psychic', lutador: 'fighting', escuridão: 'darkness', escuridao: 'darkness', metal_: 'metal', 'dragão': 'dragon', incolor: 'colorless', fada: 'psychic' };
+
+  function mapRarity(r) {
+    const s = String(r || '').toLowerCase();
+    if (!s) return 'Rara';
+    if (s.includes('special illustration')) return 'Ilustração Especial Rara';
+    if (s.includes('illustration')) return 'Ilustração Rara';
+    if (s.includes('hyper') || s.includes('gold')) return 'Hiper Rara (Gold)';
+    if (s.includes('secret')) return 'Secreta';
+    if (s.includes('double')) return 'Rara Dupla (ex/V)';
+    if (s.includes('ultra') || s.includes('full art')) return 'Ultra Rara';
+    if (s.includes('promo')) return 'Promo';
+    if (s.includes('holo')) return 'Rara Holo';
+    if (s.includes('uncommon') || s.includes('incomum')) return 'Incomum';
+    if (s.includes('common') || s.includes('comum')) return 'Comum';
+    if (s.includes('rare') || s.includes('rara')) return 'Rara';
+    return 'Rara';
+  }
+
+  async function getJSON(url) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+
+  async function searchCardsOnline(q) {
+    const m = q.trim().match(/^(.*?)(?:\s+#?(\d+)(?:\s*\/\s*\d+)?)?$/);
+    const name = (m ? m[1] : q).trim();
+    const num = m && m[2];
+    if (!name) return [];
+    const byLang = async (lang) => {
+      try {
+        const list = await getJSON(`${TCGDEX}/${lang}/cards?name=${encodeURIComponent(name)}`);
+        return Array.isArray(list) ? list.map((c) => ({ ...c, lang })) : [];
+      } catch { return []; }
+    };
+    let list = await byLang('en');
+    if (!list.length) list = await byLang('pt');
+    if (num) {
+      const f = list.filter((c) => parseInt(c.localId, 10) === parseInt(num, 10));
+      if (f.length) list = f;
+    }
+    return list.reverse().slice(0, 90); // coleções mais novas primeiro
+  }
+
+  const getCardOnline = (id, lang = 'en') => getJSON(`${TCGDEX}/${lang}/cards/${encodeURIComponent(id)}`);
+
+  async function rateToBRL(cur) {
+    const key = 'pv_rate_' + cur;
+    let cached = null;
+    try { cached = JSON.parse(localStorage.getItem(key) || 'null'); } catch {}
+    if (cached && Date.now() - cached.t < 6 * 36e5) return cached.v;
+    const sources = [
+      async () => (await getJSON(`https://api.frankfurter.app/latest?from=${cur}&to=BRL`)).rates.BRL,
+      async () => (await getJSON(`https://open.er-api.com/v6/latest/${cur}`)).rates.BRL,
+    ];
+    for (const s of sources) {
+      try { const v = await s(); if (v > 0) { localStorage.setItem(key, JSON.stringify({ v, t: Date.now() })); return v; } } catch {}
+    }
+    return cached ? cached.v : { USD: 5.5, EUR: 6.0 }[cur]; // reserva aproximada se estiver offline
+  }
+
+  const VARIANT_NAMES = { normal: 'Normal', holofoil: 'Holo', holo: 'Holo', reverse: 'Reverse', 'reverse-holofoil': 'Reverse', reverseHolofoil: 'Reverse', '1st-edition-holofoil': '1ª ed. Holo', '1st-edition': '1ª edição', unlimited: 'Unlimited', 'unlimited-holofoil': 'Unlimited Holo' };
+
+  // Retorna as opções de preço (já em BRL) de uma carta da TCGdex
+  async function priceOptions(card) {
+    const p = card.pricing || {};
+    const opts = [];
+    const tp = p.tcgplayer;
+    if (tp) {
+      Object.entries(tp).forEach(([k, v]) => {
+        if (!v || typeof v !== 'object') return;
+        const native = v.marketPrice || v.midPrice || v.lowPrice;
+        if (native > 0) opts.push({ src: 'tcgplayer', key: k, label: `TCGplayer · ${VARIANT_NAMES[k] || k}`, native, cur: 'USD', updated: tp.updated });
+      });
+    }
+    const cm = p.cardmarket;
+    if (cm) {
+      const trend = cm.trend || cm.avg30 || cm.avg;
+      if (trend > 0) opts.push({ src: 'cardmarket', key: 'trend', label: 'Cardmarket · Tendência', native: trend, cur: 'EUR', updated: cm.updated });
+      const holo = cm['trend-holo'] || cm['avg30-holo'];
+      if (holo > 0) opts.push({ src: 'cardmarket', key: 'trend-holo', label: 'Cardmarket · Holo', native: holo, cur: 'EUR', updated: cm.updated });
+    }
+    const rates = {};
+    for (const cur of new Set(opts.map((o) => o.cur))) rates[cur] = await rateToBRL(cur);
+    opts.forEach((o) => { o.rate = rates[o.cur]; o.brl = Math.round(o.native * o.rate * 100) / 100; });
+    return opts;
+  }
+
+  function priceOptionValue(card, ref, opts) {
+    if (!opts.length) return null;
+    const exact = ref && opts.find((o) => o.src === ref.src && o.key === ref.key);
+    return exact || opts.find((o) => ref && o.src === ref.src) || opts[0];
+  }
+
+  function priceChips(opts, selected) {
+    if (!opts.length) return '<div class="hint">Não há preço de mercado disponível para esta carta. Pesquise manualmente nos links abaixo.</div>';
+    const sym = { USD: 'US$', EUR: '€' };
+    return `<div class="api-prices">${opts.map((o, i) => `
+      <button type="button" class="api-price ${selected && selected.src === o.src && selected.key === o.key ? 'active' : ''}" data-opt="${i}">
+        <span>${esc(o.label)}</span>
+        <strong class="num">${brl.format(o.brl)}</strong>
+        <small>${sym[o.cur]} ${o.native.toFixed(2).replace('.', ',')} · cotação ${o.rate.toFixed(2).replace('.', ',')}</small>
+      </button>`).join('')}</div>`;
+  }
+
+  function toDataURL(url) {
+    return fetch(url).then((r) => { if (!r.ok) throw 0; return r.blob(); }).then((b) => new Promise((res, rej) => {
+      const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(b);
+    }));
+  }
+
+  // Folha de busca: devolve a carta completa escolhida
+  function openSearchSheet(initial = '') {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; resolve(v); } };
+      sheet(`<h3>Buscar carta</h3>
+        <p>Digite o nome em inglês (e o número, se quiser). Ex.: <b>charizard ex 125</b></p>
+        <label class="search" style="margin-top:0">${ICON.search}<input id="s-q" type="search" placeholder="Nome da carta…" value="${esc(initial)}" enterkeyhint="search" autocomplete="off" /></label>
+        <div id="s-res" class="s-res"></div>`, (el, close) => {
+        const inp = $('#s-q', el), res = $('#s-res', el);
+        $('.sheet-backdrop').onclick = () => { close(); finish(null); };
+        let timer, seq = 0;
+        const run = async () => {
+          const q = inp.value.trim();
+          if (q.length < 2) { res.innerHTML = ''; return; }
+          const my = ++seq;
+          res.innerHTML = `<div class="s-msg"><span class="spinner"></span> Buscando…</div>`;
+          const list = await searchCardsOnline(q);
+          if (my !== seq) return;
+          if (!list.length) { res.innerHTML = `<div class="s-msg">Nenhuma carta encontrada.<br/><small>Tente o nome em inglês, ex.: “Pikachu ex”.</small></div>`; return; }
+          res.innerHTML = `<div class="s-count">${list.length} resultado${list.length > 1 ? 's' : ''}${list.length >= 90 ? ' (mostrando 90 — adicione o número para filtrar)' : ''}</div>
+            <div class="s-grid">${list.map((c, i) => `<button class="s-item" data-i="${i}">
+              <div class="art">${c.image ? `<img src="${c.image}/low.webp" loading="lazy" alt="" />` : `<div class="ph"><div class="ph-name">${esc(c.name)}</div></div>`}</div>
+              <small>#${esc(c.localId)} · ${esc(c.id.split('-')[0])}</small></button>`).join('')}</div>`;
+          $$('.s-item', res).forEach((b) => b.onclick = async () => {
+            const brief = list[+b.dataset.i];
+            res.innerHTML = `<div class="s-msg"><span class="spinner"></span> Carregando ${esc(brief.name)}…</div>`;
+            try {
+              const full = await getCardOnline(brief.id, brief.lang);
+              full._lang = brief.lang;
+              close(); finish(full);
+            } catch { toast('Falha ao carregar a carta'); run(); }
+          });
+        };
+        inp.oninput = () => { clearTimeout(timer); timer = setTimeout(run, 450); };
+        inp.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(timer); run(); inp.blur(); } };
+        setTimeout(() => inp.focus(), 250);
+        if (initial) run();
+      });
+    });
+  }
+
+  async function applyOnlineCard(full) {
+    const d = state.draft; if (!d) return;
+    const total = full.set?.cardCount?.official;
+    d.name = full.name || d.name;
+    d.set = full.set?.name || d.set;
+    d.number = full.localId ? (total ? `${full.localId}/${String(total).padStart(String(full.localId).length, '0')}` : full.localId) : d.number;
+    const t = (full.types && full.types[0]) ? TYPE_MAP[full.types[0].toLowerCase()] : null;
+    d.type = full.category === 'Trainer' || full.category === 'Treinador' ? 'trainer' : full.category === 'Energy' || full.category === 'Energia' ? 'energy' : (t || d.type);
+    d.rarity = mapRarity(full.rarity);
+    d.apiId = full.id; d.apiLang = full._lang || 'en';
+    if (full.image) {
+      d.officialImage = `${full.image}/high.webp`;
+      if (!d.image || d.imageIsOfficial) {
+        try { d.image = await compressDataURL(await toDataURL(d.officialImage)); } catch { d.image = d.officialImage; }
+        d.imageIsOfficial = true;
+      }
+    }
+    d.apiPrices = await priceOptions(full);
+    const best = priceOptionValue(full, d.priceRef, d.apiPrices);
+    if (best) { d.value = best.brl; d.priceRef = { src: best.src, key: best.key }; }
+  }
+
+  function compressDataURL(dataUrl) {
+    return new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, 900 / Math.max(img.width, img.height));
+        const cv = document.createElement('canvas'); cv.width = img.width * scale; cv.height = img.height * scale;
+        cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
+        res(cv.toDataURL('image/jpeg', 0.85));
+      };
+      img.onerror = rej; img.src = dataUrl;
+    });
+  }
+
+  // Atualiza preço de uma carta já cadastrada; retorna {old, value} ou null
+  async function refreshCardPrice(c) {
+    if (!c.apiId) return null;
+    const full = await getCardOnline(c.apiId, c.apiLang || 'en');
+    const opts = await priceOptions(full);
+    const best = priceOptionValue(full, c.priceRef, opts);
+    if (!best) return null;
+    return { old: c.value, value: best.brl, opt: best, opts };
+  }
+
+  async function applyNewValue(c, v) {
+    if (v === c.value) return false;
+    c.value = v; c.updatedAt = Date.now();
+    c.priceHistory = [...(c.priceHistory || []), { d: Date.now(), v }];
+    await DB.put('cards', c);
+    return true;
+  }
+
+  async function refreshAllPrices() {
+    const linked = state.cards.filter((c) => c.apiId);
+    if (!linked.length) { toast('Nenhuma carta vinculada à busca automática'); return; }
+    let done = 0, changed = 0, before = totals().value;
+    const close = sheet(`<h3>Atualizando preços</h3><p id="ra-msg">0 de ${linked.length} cartas…</p>
+      <div class="bar-track"><div class="bar-fill" id="ra-bar" style="width:0%;animation:none"></div></div>`, (el) => { $('.sheet-backdrop').onclick = null; });
+    for (const c of linked) {
+      try { const r = await refreshCardPrice(c); if (r && await applyNewValue(c, r.value)) changed++; } catch {}
+      done++;
+      const m = $('#ra-msg'), b = $('#ra-bar');
+      if (m) m.textContent = `${done} de ${linked.length} cartas…`;
+      if (b) b.style.width = (done / linked.length) * 100 + '%';
+    }
+    await recordSnapshot();
+    close();
+    const diff = totals().value - before;
+    toast(changed ? `${changed} preço${changed > 1 ? 's' : ''} atualizado${changed > 1 ? 's' : ''} · ${diff >= 0 ? '+' : '−'}${brl.format(Math.abs(diff))}` : 'Preços já estavam atualizados ✓');
+    render(true);
+  }
+
+  // =========================================================
   // TELAS
   // =========================================================
 
@@ -295,7 +527,10 @@
           <a href="#/ajustes" class="avatar">${esc(initials(state.trainer))}</a>
           <div class="hello"><small>${greeting()},</small><strong>${esc(state.trainer || 'Treinador(a)')}</strong></div>
         </div>
-        <button class="icon-btn ${state.hide ? 'on' : ''}" id="toggle-hide" aria-label="Ocultar valores">${state.hide ? ICON.eyeOff : ICON.eye}</button>
+        <div style="display:flex;gap:8px">
+          ${state.cards.some((c) => c.apiId) ? `<button class="icon-btn" id="home-refresh" aria-label="Atualizar preços">${ICON.refresh}</button>` : ''}
+          <button class="icon-btn ${state.hide ? 'on' : ''}" id="toggle-hide" aria-label="Ocultar valores">${state.hide ? ICON.eyeOff : ICON.eye}</button>
+        </div>
       </header>
 
       <section class="balance">
@@ -368,6 +603,7 @@
     $('#toggle-hide').onclick = () => { state.hide = !state.hide; localStorage.setItem('pv_hide', state.hide ? '1' : '0'); render(); };
     $$('[data-range]').forEach((b) => b.onclick = () => { state.range = b.dataset.range; localStorage.setItem('pv_range', state.range); render(true); });
     const demo = $('#load-demo'); if (demo) demo.onclick = loadDemo;
+    const rf = $('#home-refresh'); if (rf) rf.onclick = refreshAllPrices;
     const pts = seriesFor(state.range);
     const startV = pts[0].v;
     const rangeLabel = $('#bal-change .period')?.textContent;
@@ -470,6 +706,13 @@
         <h1>${editing ? 'Editar carta' : 'Nova carta'}</h1>
       </div>
 
+      <button type="button" class="auto-search" id="auto-search">
+        <span class="as-ico">${ICON.search}</span>
+        <span class="as-t"><strong>${d.apiId ? 'Carta vinculada ✓ · trocar' : 'Buscar carta automaticamente'}</strong>
+        <small>${d.apiId ? esc(d.name) + ' · ' + esc(d.set) : 'Preenche dados, imagem oficial e preço de mercado em R$'}</small></span>
+        <span class="chev">›</span>
+      </button>
+
       <div class="photo-slot ${d.image ? 'has' : ''}" id="photo-slot">
         ${d.image ? `<img src="${d.image}" alt="Foto da carta" />` : `
           <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
@@ -496,6 +739,7 @@
 
         <div class="field"><label>Valor de mercado (unidade)</label>
           <div class="money big"><span>R$</span><input class="input num" id="f-value" name="value" inputmode="decimal" placeholder="0,00" value="${moneyInput(d.value)}" /></div>
+          ${d.apiPrices ? `<div id="api-prices">${priceChips(d.apiPrices, d.priceRef)}</div>` : ''}
           <div class="price-links" id="price-links"></div>
         </div>
 
@@ -560,6 +804,24 @@
     $$('[data-step]').forEach((b) => b.onclick = () => { $('#f-qty').value = Math.max(1, (parseInt($('#f-qty').value, 10) || 1) + +b.dataset.step); updatePreview(); });
     ['#f-value', '#f-paid'].forEach((s) => $(s).addEventListener('blur', (e) => { const v = parseMoney(e.target.value); e.target.value = moneyInput(v); }));
 
+    $('#auto-search').onclick = async () => {
+      sync();
+      const full = await openSearchSheet(d.apiId ? '' : d.name);
+      if (!full) return;
+      const close = sheet(`<h3>Buscando preço…</h3><p><span class="spinner"></span> Carregando dados e convertendo para R$.</p>`, () => { $('.sheet-backdrop').onclick = null; });
+      try { await applyOnlineCard(full); } catch (e) { console.error(e); toast('Não foi possível obter o preço'); }
+      close();
+      render(true);
+      toast(d.apiPrices && d.apiPrices.length ? 'Dados e preço preenchidos ✓' : 'Dados preenchidos — sem preço disponível');
+    };
+    $$('[data-opt]').forEach((b) => b.onclick = () => {
+      const o = d.apiPrices[+b.dataset.opt];
+      d.value = o.brl; d.priceRef = { src: o.src, key: o.key };
+      $('#f-value').value = moneyInput(o.brl);
+      $$('[data-opt]').forEach((x) => x.classList.toggle('active', x === b));
+      updatePreview();
+    });
+
     const pick = (inputId) => { sync(); const inp = $(inputId); inp.value = ''; inp.click(); };
     $('#btn-cam').onclick = () => pick('#file-camera');
     $('#btn-gal').onclick = () => pick('#file-gallery');
@@ -572,7 +834,7 @@
       const now = Date.now();
       const existing = id ? state.cards.find((c) => c.id === id) : null;
       const card = { ...d };
-      delete card._for;
+      delete card._for; delete card.apiPrices;
       card.name = card.name.trim();
       if (existing) {
         card.updatedAt = now;
@@ -598,6 +860,7 @@
     if (!file || !state.draft) return;
     try {
       state.draft.image = await compressImage(file, 900, 0.82);
+      state.draft.imageIsOfficial = false;
       render();
     } catch (err) {
       console.error(err); toast('Não foi possível ler a imagem');
@@ -715,18 +978,35 @@
     $('#update-value').onclick = () => {
       sheet(`<h3>Atualizar valor</h3><p>Informe o valor de mercado atual de <b>${esc(c.name)}</b> (por unidade). Isso entra no histórico e no seu patrimônio.</p>
         <div class="money big"><span>R$</span><input class="input num" id="nv" inputmode="decimal" value="${moneyInput(c.value)}" /></div>
+        <div id="nv-online">${c.apiId
+          ? `<div class="s-msg" style="padding:14px 0 4px"><span class="spinner"></span> Buscando preço online…</div>`
+          : `<a class="hint" href="#/editar/${c.id}" style="display:block">🔎 <b style="color:var(--yellow)">Vincular à busca automática</b> para obter o preço online</a>`}</div>
         <div class="price-links">${priceLinks(c.name, c.number)}</div>
         <button class="btn btn-primary btn-block" id="nv-save">Salvar novo valor</button>`, (el, close) => {
-        const inp = $('#nv', el); setTimeout(() => { inp.focus(); inp.select(); }, 250);
+        const inp = $('#nv', el);
+        if (!c.apiId) setTimeout(() => { inp.focus(); inp.select(); }, 250);
+        $('a[href^="#/editar"]', el)?.addEventListener('click', close);
+        if (c.apiId) {
+          refreshCardPrice(c).then((r) => {
+            const box = $('#nv-online', el); if (!box) return;
+            if (!r) { box.innerHTML = '<div class="hint">Sem preço online para esta carta.</div>'; return; }
+            box.innerHTML = priceChips(r.opts, r.opt);
+            inp.value = moneyInput(r.value);
+            $$('[data-opt]', box).forEach((b) => b.onclick = () => {
+              const o = r.opts[+b.dataset.opt];
+              inp.value = moneyInput(o.brl);
+              c.priceRef = { src: o.src, key: o.key };
+              $$('[data-opt]', box).forEach((x) => x.classList.toggle('active', x === b));
+            });
+          }).catch(() => { const box = $('#nv-online', el); if (box) box.innerHTML = '<div class="hint">Sem conexão para buscar o preço agora.</div>'; });
+        }
         $('#nv-save', el).onclick = async () => {
           const v = parseMoney(inp.value);
-          if (v !== c.value) {
-            const old = c.value;
-            c.value = v; c.updatedAt = Date.now();
-            c.priceHistory = [...(c.priceHistory || []), { d: Date.now(), v }];
-            await DB.put('cards', c); await recordSnapshot();
+          const old = c.value;
+          if (await applyNewValue(c, v)) {
+            await recordSnapshot();
             toast(v > old ? `📈 Valorizou ${pct(((v - old) / (old || 1)) * 100)}!` : 'Valor atualizado');
-          }
+          } else { await DB.put('cards', c); }
           close(); render();
         };
       });
@@ -836,6 +1116,7 @@
       <section class="section">
         <div class="section-head"><h2>Dados</h2></div>
         <div class="menu">
+          <button id="refresh-all">${mi('rgba(255,203,5,.15)', '#FFCB05', ICON.refresh)}<span class="mt">Atualizar todos os preços<small>${state.cards.filter((c) => c.apiId).length} cartas vinculadas à busca automática</small></span><span class="chev">›</span></button>
           <button id="export">${mi('rgba(61,125,255,.15)', '#7CA6FF', ICON.download)}<span class="mt">Exportar backup<small>Salva coleção e fotos em um arquivo .json</small></span><span class="chev">›</span></button>
           <button id="import">${mi('rgba(46,230,166,.15)', '#2EE6A6', ICON.upload)}<span class="mt">Importar backup<small>Restaura a partir de um arquivo .json</small></span><span class="chev">›</span></button>
           <button id="demo">${mi('rgba(255,203,5,.15)', '#FFCB05', ICON.spark)}<span class="mt">Adicionar cartas de exemplo<small>Para conhecer o app</small></span><span class="chev">›</span></button>
@@ -855,6 +1136,7 @@
 
   function bindSettings() {
     $('#trainer').onchange = async (e) => { state.trainer = e.target.value.trim(); await DB.setMeta('trainer', state.trainer); toast('Nome salvo'); render(); };
+    $('#refresh-all').onclick = refreshAllPrices;
     $('#export').onclick = exportData;
     $('#import').onclick = () => { const i = $('#file-import'); i.value = ''; i.click(); };
     $('#demo').onclick = loadDemo;
